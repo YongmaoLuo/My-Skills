@@ -7,6 +7,52 @@ description: Guides users through creating Agent Skills following the Agent Skil
 
 This skill guides you through creating Agent Skills that can be used across multiple AI agent platforms including Claude Code, Cursor, OpenCode, and others.
 
+## Before Creating: Search for Existing Skills
+
+**IMPORTANT**: Always search for existing skills before creating a new one to avoid duplication.
+
+### Step 1: Search Local Skills
+
+First, search for existing skills in local repositories:
+
+```bash
+# Search using agent-skills-cli if available
+skills list --json | grep -i "<keyword>"
+
+# Or manually search skill directories
+find ~/Documents/GitHub/My-Skills -name "SKILL.md" -exec grep -H "description" {} \;
+find /Users/yongmaoluo/Documents/GitHub/private-skills -name "SKILL.md" -exec grep -H "description" {} \;
+```
+
+### Step 2: Search Using Oh-My-OpenCode MCP Tools
+
+Use available MCP tools to search for skills:
+
+1. **Session Search** - Search past sessions for similar skill creation requests:
+   ```
+   session_search("<skill type or capability>")
+   ```
+
+2. **Skill Discovery via MCP** - Check installed skills:
+   ```
+   skill_mcp(mcp_name="opencode-agent-skills", list_servers=true)
+   ```
+
+3. **Web Search** - Search for existing skills in public repositories:
+   ```
+   websearch("agent skills <topic> github 2026")
+   ```
+
+### Step 3: Evaluate Search Results
+
+If existing skills are found:
+- Compare descriptions and capabilities
+- Check if existing skill fully addresses the requirement
+- Consider contributing to existing skill instead of creating duplicate
+- Proceed with new skill only if existing skills don't meet needs
+
+**If no suitable existing skills found**, proceed to create new skill.
+
 ## Understanding Agent Skills
 
 Agent Skills are folders containing:
@@ -19,7 +65,7 @@ The format is defined by the Agent Skills open standard at agentskills.io.
 
 ## Step 1: Create Directory Structure
 
-Create a new directory for your skill:
+**After confirming no suitable existing skills exist**, create a new directory for your skill:
 
 ```bash
 mkdir my-skill-name
@@ -189,7 +235,13 @@ Skills should be structured for efficient context usage:
 
 ## Step 4: Validate Your Skill
 
-Use the skills-ref reference library to validate:
+Use the validation script in this skill:
+
+```bash
+python3 ~/Documents/GitHub/My-Skills/skill-creating/scripts/validate_skill.py ./my-skill
+```
+
+Or use the skills-ref reference library to validate:
 
 ```bash
 skills-ref validate ./my-skill
@@ -199,6 +251,32 @@ This checks:
 - SKILL.md frontmatter is valid
 - Naming conventions are followed
 - Required fields are present
+- Directory name matches frontmatter
+
+## Step 5: Test Your Skill
+
+After validation, test the skill to ensure it works as expected:
+
+1. **Load the skill**: `skill_mcp(mcp_name="your-skill-name")` or use the skill in your agent
+2. **Follow the skill instructions**: Create a test scenario that matches the skill's use case
+3. **Verify functionality**: Ensure the skill produces the expected output
+4. **Document issues**: Note any problems for refinement
+
+**Example testing workflow**:
+```
+User request: "Test the news-gathering skill"
+
+Actions:
+1. Load the skill
+2. Provide a test request: "Gather news about AI developments from techcrunch.com"
+3. Verify the skill:
+   - Successfully navigates to the website
+   - Extracts relevant news articles
+   - Returns structured information (title, date, summary, URL)
+4. Report results and any issues found
+```
+
+This checks:
 
 **Get skills-ref:**
 ```bash
@@ -250,6 +328,59 @@ Upload via the skills interface in settings
 ### Public Registries
 - Submit to SkillCreator.ai marketplace
 - Add to agentskills.io directory
+
+## Example: Complete Skill Creation Workflow
+
+### Scenario: User wants a skill for gathering news from official websites
+
+**Step 1: Search for existing skills**
+```bash
+# Search local skills
+skills list --json | grep -i "news"
+
+# Search local directories
+find ~/Documents/GitHub/My-Skills -name "SKILL.md" -exec grep -i "news\|media\|content.*scraping" {} \;
+
+# Use MCP tools
+session_search("news gathering website")
+
+# Web search
+websearch("agent skills news scraping media websites github 2026")
+```
+
+**Step 2: Evaluate results**
+- Found `blogwatcher` skill that monitors blogs
+- Found `peekaboo` skill for web scraping
+- Evaluate: Do these cover the requirement for gathering news from official websites?
+
+**Step 3: Decision**
+- If existing skills meet needs → Use existing skill
+- If not → Proceed to create new skill
+
+**Step 4: Create skill directory**
+```bash
+mkdir ~/Documents/GitHub/My-Skills/news-gatherer
+cd ~/Documents/GitHub/My-Skills/news-gatherer
+```
+
+**Step 5: Write SKILL.md**
+```yaml
+---
+name: news-gatherer
+description: Gathers news and articles from official news websites and media platforms. Scrapes headlines, summaries, and metadata from news sources. Use when user wants to collect information from news sites, media platforms, or official websites.
+---
+```
+
+**Step 6: Validate**
+```bash
+python3 ~/Documents/GitHub/My-Skills/skill-creating/scripts/validate_skill.py ./news-gatherer
+```
+
+**Step 7: Test**
+- Load skill and test with a news website
+- Verify article extraction works
+- Test with multiple news sources
+- Document any issues
 
 ## Example: Complete Skill Structure
 
