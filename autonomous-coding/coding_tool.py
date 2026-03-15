@@ -48,6 +48,76 @@ class CodingTool(ABC):
         pass
 
 
+class ClaudeCodingTool(CodingTool):
+    """Claude Code CLI tool — runs `claude --dangerously-skip-permissions -p <prompt>`."""
+
+    DEFAULT_MODEL = "claude-sonnet-4-6"
+
+    def __init__(self, model: Optional[str] = None):
+        self.model = model or self.DEFAULT_MODEL
+
+    def _run_claude(self, prompt: str, system_instruction: Optional[str] = None) -> str:
+        """Run Claude Code CLI in non-interactive print mode."""
+        import subprocess
+        cmd = [
+            "claude",
+            "--dangerously-skip-permissions",
+            "-p", prompt,
+        ]
+        if system_instruction:
+            cmd += ["--append-system-prompt", system_instruction]
+        if self.model:
+            cmd += ["--model", self.model]
+
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise Exception(f"Claude CLI failed: {result.stderr or result.stdout}")
+        return result.stdout
+
+    def query(self, prompt: str, system_instruction: Optional[str] = None,
+              retries: int = 3, timeout: Optional[int] = None) -> str:
+        """Run a subtask through Claude Code CLI."""
+        def _query_internal():
+            return self._run_claude(prompt, system_instruction)
+
+        if timeout is None:
+            return _query_internal()
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_query_internal)
+            try:
+                return future.result(timeout=timeout)
+            except FuturesTimeoutError:
+                future.cancel()
+                raise TimeoutError(f"Query timed out after {timeout} seconds")
+
+    def query_json(self, prompt: str, system_instruction: Optional[str] = None,
+                   retries: int = 3, timeout: Optional[int] = None) -> dict:
+        """Run a subtask through Claude Code CLI and parse the JSON response."""
+        import json
+
+        json_prompt = prompt + "\n\nIMPORTANT: Return ONLY the JSON object requested, no markdown fencing."
+
+        def _query_json_internal():
+            response_text = self._run_claude(json_prompt, system_instruction)
+            start = response_text.find('{')
+            end = response_text.rfind('}') + 1
+            if start != -1 and end > start:
+                return json.loads(response_text[start:end])
+            return json.loads(response_text)
+
+        if timeout is None:
+            return _query_json_internal()
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_query_json_internal)
+            try:
+                return future.result(timeout=timeout)
+            except FuturesTimeoutError:
+                future.cancel()
+                raise TimeoutError(f"Query timed out after {timeout} seconds")
+
+
 class OpenCodeCodingTool(CodingTool):
     """OpenCode AI coding tool using opencode CLI."""
     

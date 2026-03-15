@@ -11,7 +11,7 @@ import json
 from pathlib import Path
 from typing import Optional, List
 
-from coding_tool import CodingTool, OpenCodeCodingTool
+from coding_tool import CodingTool, OpenCodeCodingTool, ClaudeCodingTool
 from task_manager import TaskManager
 from executor import Executor
 from git_manager import GitManager
@@ -22,6 +22,15 @@ from config_registry import ConfigRegistry
 from retry_manager import RetryManager
 from background_manager import BackgroundManager
 from rollback_manager import RollbackManager
+
+
+class FatalTaskError(Exception):
+    """Raised when a task has failed too many times and requires human intervention."""
+
+    def __init__(self, task_id: str, reason: str):
+        self.task_id = task_id
+        self.reason = reason
+        super().__init__(f"Task [{task_id}] fatally failed: {reason}")
 
 
 class AutonomousAgent:
@@ -180,7 +189,20 @@ class AutonomousAgent:
                 break
 
             # Execute task with retry mechanism
-            success = self._execute_task_with_retry(task, max_retries=self.config.max_retries, timeout=timeout)
+            try:
+                success = self._execute_task_with_retry(task, max_retries=self.config.max_retries, timeout=timeout)
+            except FatalTaskError as e:
+                print(f"\n{'=' * 60}")
+                print(f"AUTONOMOUS CODING STOPPED — HUMAN INTERVENTION REQUIRED")
+                print(f"{'=' * 60}")
+                print(f"Task [{e.task_id}] has failed {self.task_manager.MAX_TASK_ERRORS} times "
+                      f"and the system cannot resolve it automatically.")
+                print(f"\nReason recorded in tasks.json:")
+                print(f"  {e.reason}")
+                print(f"\nPlease inspect tasks.json for the full failure context,")
+                print(f"fix the underlying issue, and re-run with --recover.")
+                print(f"{'=' * 60}\n")
+                break
             task_count += 1
 
             # Update total tasks count after potential refinement
@@ -192,15 +214,17 @@ class AutonomousAgent:
 
         Args:
             task: Task to execute
-            max_retries: Maximum number of retry attempts
+            max_retries: Maximum number of retry attempts per run
             timeout: Timeout for AI queries
 
         Returns:
-            True if task completed successfully
+            True if task completed successfully, False if it failed.
+            Raises FatalTaskError if the task has persistently failed MAX_TASK_ERRORS times.
         """
         for attempt in range(max_retries):
             try:
-                print(f"\n--- Processing Task [{task.id}] (Attempt {attempt + 1}/{max_retries}): {task.title} ---")
+                print(f"\n--- Processing Task [{task.id}] (Attempt {attempt + 1}/{max_retries}, "
+                      f"total errors: {task.error_count}): {task.title} ---")
                 self.task_manager.update_task_status(task.id, "in_progress")
 
                 # Get context and add retry modifier if this is a retry
@@ -208,9 +232,14 @@ class AutonomousAgent:
                 context = f"Subtask: {task.description}\nTest Command: {task.test_command}\n"
                 context += f"\nCurrent codebase:\n{file_context}\n"
 
-                # Add retry context if this is a retry attempt
-                if attempt > 0:
+                # Add retry context if this is a retry attempt (in-run or cross-run)
+                if attempt > 0 or task.error_count > 0:
                     retry_modifier = self.retry_manager.get_retry_prompt_modifier(task.id)
+                    if task.last_error and not retry_modifier:
+                        retry_modifier = (
+                            f"\n\n[PREVIOUS RUN ERROR]\nThis task failed in a previous run with:\n"
+                            f"{task.last_error}\nPlease try a different approach."
+                        )
                     context += retry_modifier
 
                 # Use config's executor prompt
@@ -240,21 +269,28 @@ class AutonomousAgent:
                     print(f"Task timed out: {e}")
                     self.executor.record_timeout(task.id, timeout or 300)
                     self.retry_manager.record_attempt(task.id, str(e), False)
+                    error_msg = str(e)
 
                     if attempt < max_retries - 1:
                         print("Retrying...")
                         continue
-                    else:
-                        print("Max retries reached, breaking down task...")
-                        self._breakdown_failed_task(task, str(e))
-                        return False
+
+                    print("Max retries reached after timeouts, breaking down task...")
+                    self._breakdown_failed_task(task, error_msg)
+                    fatal = self.task_manager.record_task_error(task.id, error_msg)
+                    if fatal:
+                        raise FatalTaskError(task.id, task.failure_reason or error_msg)
+                    return False
 
                 if coder_response is None:
                     print("No response from coding tool.")
-                    self.retry_manager.record_attempt(task.id, "No response from coding tool", False)
+                    error_msg = "No response from coding tool"
+                    self.retry_manager.record_attempt(task.id, error_msg, False)
                     if attempt < max_retries - 1:
                         continue
-                    self.task_manager.update_task_status(task.id, "failed")
+                    fatal = self.task_manager.record_task_error(task.id, error_msg)
+                    if fatal:
+                        raise FatalTaskError(task.id, task.failure_reason or error_msg)
                     return False
 
                 # Apply file changes
@@ -308,22 +344,30 @@ class AutonomousAgent:
 
                     if attempt < max_retries - 1:
                         print("Retrying with refined approach...")
-                        # Reset task status for retry
-                        self.task_manager.update_task_status(task.id, "pending")
                         continue
-                    else:
-                        print("Max retries reached, task failed.")
-                        self.task_manager.update_task_status(task.id, "failed")
-                        return False
+
+                    # All in-run retries exhausted — record persistent error
+                    print("All retries exhausted for this run.")
+                    fatal = self.task_manager.record_task_error(task.id, error_msg)
+                    if fatal:
+                        raise FatalTaskError(task.id, task.failure_reason or error_msg)
+                    return False
+
+            except FatalTaskError:
+                raise  # propagate upward to stop the run
 
             except Exception as e:
                 print(f"An unexpected error occurred while processing task: {e}")
-                self.retry_manager.record_attempt(task.id, str(e), False)
-                self.task_manager.update_task_status(task.id, "failed")
+                error_msg = str(e)
+                self.retry_manager.record_attempt(task.id, error_msg, False)
 
                 if attempt < max_retries - 1:
                     print("Retrying after error...")
                     continue
+
+                fatal = self.task_manager.record_task_error(task.id, error_msg)
+                if fatal:
+                    raise FatalTaskError(task.id, task.failure_reason or error_msg)
                 return False
 
         return False
@@ -426,7 +470,8 @@ def autonomous_coding(
     project_dir: str,
     recover: bool = False,
     max_tasks: Optional[int] = None,
-    config_name: Optional[str] = None
+    config_name: Optional[str] = None,
+    tool: Optional[str] = None
 ):
     """
     Fully autonomous software development from requirement to completion.
@@ -437,9 +482,16 @@ def autonomous_coding(
         recover: Whether to skip planning and recover from crash
         max_tasks: Maximum number of tasks to execute
         config_name: Name of configuration to use (e.g., 'coding', 'harmonyos')
+        tool: Coding tool to use ('opencode' or 'claude', default: 'opencode')
     """
     project_path = Path(project_dir).resolve()
-    coding_tool = OpenCodeCodingTool()
+
+    tool = (tool or "opencode").lower()
+    if tool == "claude":
+        coding_tool = ClaudeCodingTool()
+        print("Using Claude as the coding tool.")
+    else:
+        coding_tool = OpenCodeCodingTool()
 
     # Load configuration
     config = None

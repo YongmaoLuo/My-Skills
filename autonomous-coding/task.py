@@ -19,7 +19,9 @@ class SubTask:
         test_command: str,
         status: str = "pending",
         updated_time: Optional[str] = None,
-        **kwargs  # Accept and ignore extra fields for forward-compatibility
+        error_count: int = 0,
+        last_error: Optional[str] = None,
+        failure_reason: Optional[str] = None
     ):
         self.id = id
         self.title = title
@@ -27,6 +29,9 @@ class SubTask:
         self.test_command = test_command
         self.status = status
         self.updated_time = updated_time
+        self.error_count = error_count
+        self.last_error = last_error
+        self.failure_reason = failure_reason
 
     def model_dump(self, mode: str = 'python', exclude_none: bool = False) -> dict:
         """
@@ -44,8 +49,13 @@ class SubTask:
             "title": self.title,
             "description": self.description,
             "test_command": self.test_command,
-            "status": self.status
+            "status": self.status,
+            "error_count": self.error_count
         }
         if not exclude_none or self.updated_time is not None:
             result["updated_time"] = self.updated_time
+        if not exclude_none or self.last_error is not None:
+            result["last_error"] = self.last_error
+        if not exclude_none or self.failure_reason is not None:
+            result["failure_reason"] = self.failure_reason
         return result

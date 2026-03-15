@@ -38,6 +38,8 @@ Examples:
     parser.add_argument("--recover", action="store_true", help="Recover from previous crash (skip planning)")
     parser.add_argument("--max-tasks", type=int, default=None, help="Maximum tasks to execute")
     parser.add_argument("--config", "-c", default=None, help="Configuration name (e.g., 'coding', 'harmonyos')")
+    parser.add_argument("--tool", "-t", default=None, choices=["opencode", "claude"],
+                        help="Coding tool to use: 'opencode' (default) or 'claude' (requires ANTHROPIC_API_KEY)")
 
     # Rollback subcommand
     subparsers = parser.add_subparsers(dest='command', help='Available commands')
@@ -83,7 +85,8 @@ Examples:
         project_dir=workspace_dir,
         recover=args.recover,
         max_tasks=args.max_tasks,
-        config_name=args.config
+        config_name=args.config,
+        tool=args.tool
     )
 
 
