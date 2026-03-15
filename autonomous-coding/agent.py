@@ -165,27 +165,6 @@ class AutonomousAgent:
             max_tasks: Maximum number of tasks to execute
             timeout: Timeout for each AI query in seconds
         """
-        # Detect tasks that failed in a previous run — the same task failing twice
-        # means the system cannot resolve it; stop and ask for human help.
-        previously_failed = [t for t in self.task_manager.tasks if t.status == "failed"]
-        if previously_failed:
-            task = previously_failed[0]
-            detail = (
-                f"Task [{task.id}] '{task.title}' failed in a previous run and failed again. "
-                f"{task.failure_reason or 'No error details recorded.'}"
-            )
-            self.task_manager.set_stop_reason("repeated_failure", detail)
-            print(f"\n{'=' * 60}")
-            print(f"AUTONOMOUS CODING STOPPED — HUMAN INTERVENTION REQUIRED")
-            print(f"{'=' * 60}")
-            print(f"Task [{task.id}] '{task.title}' failed in a previous run.")
-            print(f"The system cannot resolve this automatically.")
-            print(f"\nReason recorded in tasks.json:")
-            print(f"  {task.failure_reason or 'See tasks.json for details.'}")
-            print(f"\nPlease fix the underlying issue and re-run.")
-            print(f"{'=' * 60}\n")
-            return
-
         total_tasks = len(self.task_manager.tasks)
         completed_tasks = sum(1 for t in self.task_manager.tasks if t.status == "completed")
         task_count = 0
@@ -200,6 +179,27 @@ class AutonomousAgent:
                 if total_tasks > 0:
                     self.task_manager.set_stop_reason("success")
                     print("\nAll tasks completed!")
+                break
+
+            # Detect circular loops: if a completed task with the same title already
+            # exists, the system already applied this fix but the problem recurred.
+            duplicate = self.task_manager.find_completed_duplicate(task)
+            if duplicate:
+                detail = (
+                    f"Task [{task.id}] '{task.title}' duplicates already-completed "
+                    f"Task [{duplicate.id}]. The system applied this fix before but the "
+                    f"problem recurred, indicating it cannot be resolved automatically."
+                )
+                self.task_manager.set_stop_reason("repeated_failure", detail)
+                print(f"\n{'=' * 60}")
+                print(f"AUTONOMOUS CODING STOPPED — HUMAN INTERVENTION REQUIRED")
+                print(f"{'=' * 60}")
+                print(f"Task [{task.id}] '{task.title}' was already completed as "
+                      f"Task [{duplicate.id}] but the problem has recurred.")
+                print(f"\nReason recorded in tasks.json:")
+                print(f"  {detail}")
+                print(f"\nPlease inspect tasks.json and fix the underlying issue manually.")
+                print(f"{'=' * 60}\n")
                 break
 
             # Execute task with retry mechanism

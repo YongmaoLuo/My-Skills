@@ -116,39 +116,51 @@ class TestExecuteTaskFailure:
 
 
 # ---------------------------------------------------------------------------
-# run() — repeated-failure detection
+# run() — circular loop detection
 # ---------------------------------------------------------------------------
 
-class TestRunRepeatedFailureDetection:
-    def test_stops_immediately_when_failed_task_in_tasks_json(self):
-        """Second run: a previously failed task triggers immediate stop."""
+class TestRunCircularLoopDetection:
+    def test_stops_when_pending_task_duplicates_completed_task(self):
+        """Refiner creates a task with the same title as an already-completed one."""
         tasks = [
-            _task_dict(id="1", status="failed", failure_reason="build broke"),
-            _task_dict(id="2", status="pending"),
+            _task_dict(id="1", title="Fix auth", status="completed"),
+            _task_dict(id="2", title="Fix auth", status="pending"),  # duplicate
         ]
         agent, _ = _make_agent(tasks)
         agent.run(timeout=None)
-        # Task 2 must never be attempted
+        # Task 2 must never be executed
         assert agent.task_manager.tasks[1].status == "pending"
 
-    def test_records_repeated_failure_stop_reason(self):
-        tasks = [_task_dict(id="1", status="failed", failure_reason="old error")]
+    def test_records_repeated_failure_stop_reason_on_circular_loop(self):
+        tasks = [
+            _task_dict(id="1", title="Fix auth", status="completed"),
+            _task_dict(id="2", title="Fix auth", status="pending"),
+        ]
         agent, tmp = _make_agent(tasks)
         agent.run(timeout=None)
         tm2 = TaskManager(tmp)
         assert tm2.stop_reason == "repeated_failure"
         assert tm2.reason_detail is not None
-        assert "1" in tm2.reason_detail
+        assert "Fix auth" in tm2.reason_detail
 
-    def test_first_run_can_fail_task_and_continue_others(self):
-        """Within a single run, a failing task is marked failed but others proceed."""
+    def test_no_false_positive_for_different_titles(self):
+        """Different titles: task 2 should run normally."""
         tasks = [
-            _task_dict(id="1", status="pending"),
-            _task_dict(id="2", status="pending"),
+            _task_dict(id="1", title="Fix auth", status="completed"),
+            _task_dict(id="2", title="Add logging", status="pending"),
         ]
         agent, _ = _make_agent(tasks)
-        agent.config.max_retries = 1  # one attempt per task so mocks are predictable
-        # Task 1 fails, task 2 succeeds
+        agent.run(timeout=None)
+        assert agent.task_manager.tasks[1].status == "completed"
+
+    def test_task_failing_within_run_then_continuing_others(self):
+        """Within a single run, a failing task is marked failed but others proceed."""
+        tasks = [
+            _task_dict(id="1", title="Task A", status="pending"),
+            _task_dict(id="2", title="Task B", status="pending"),
+        ]
+        agent, _ = _make_agent(tasks)
+        agent.config.max_retries = 1
         agent.executor.run_command = MagicMock(side_effect=[
             (1, "task1 error"),
             (0, "Tests passed"),
@@ -165,13 +177,13 @@ class TestRunRepeatedFailureDetection:
 
 class TestRunLoop:
     def test_run_completes_all_tasks(self):
-        tasks = [_task_dict(id=str(i)) for i in range(3)]
+        tasks = [_task_dict(id=str(i), title=f"Task {i}") for i in range(3)]
         agent, _ = _make_agent(tasks)
         agent.run(timeout=None)
         assert all(t.status == "completed" for t in agent.task_manager.tasks)
 
     def test_run_stops_at_max_tasks(self):
-        tasks = [_task_dict(id=str(i)) for i in range(5)]
+        tasks = [_task_dict(id=str(i), title=f"Task {i}") for i in range(5)]
         agent, _ = _make_agent(tasks)
         agent.run(max_tasks=2, timeout=None)
         completed = sum(1 for t in agent.task_manager.tasks if t.status == "completed")

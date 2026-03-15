@@ -149,6 +149,43 @@ class TestUpdateTaskStatus:
         assert tm2.tasks[0].status == "completed"
 
 
+class TestFindCompletedDuplicate:
+    def test_returns_completed_task_with_same_title(self):
+        tasks = [
+            _task_dict(id="1", title="Fix auth", status="completed"),
+            _task_dict(id="2", title="Fix auth", status="pending"),
+        ]
+        _, tm = _make_manager(tasks)
+        duplicate = tm.find_completed_duplicate(tm.tasks[1])
+        assert duplicate is not None
+        assert duplicate.id == "1"
+
+    def test_returns_none_when_no_completed_duplicate(self):
+        tasks = [
+            _task_dict(id="1", title="Fix auth", status="failed"),
+            _task_dict(id="2", title="Fix auth", status="pending"),
+        ]
+        _, tm = _make_manager(tasks)
+        assert tm.find_completed_duplicate(tm.tasks[1]) is None
+
+    def test_returns_none_when_different_title(self):
+        tasks = [
+            _task_dict(id="1", title="Fix auth", status="completed"),
+            _task_dict(id="2", title="Add logging", status="pending"),
+        ]
+        _, tm = _make_manager(tasks)
+        assert tm.find_completed_duplicate(tm.tasks[1]) is None
+
+    def test_does_not_match_task_with_itself(self):
+        _, tm = _make_manager([_task_dict(id="1", title="Fix auth", status="completed")])
+        assert tm.find_completed_duplicate(tm.tasks[0]) is None
+
+    def test_returns_none_when_no_completed_tasks(self):
+        tasks = [_task_dict(id="1", title="Fix auth", status="pending")]
+        _, tm = _make_manager(tasks)
+        assert tm.find_completed_duplicate(tm.tasks[0]) is None
+
+
 class TestRecordTaskFailure:
     def test_marks_task_failed(self):
         _, tm = _make_manager([_task_dict(id="1")])

@@ -98,11 +98,29 @@ class TaskManager:
         Get the next task to process.
 
         Returns:
-            Next pending/in_progress task, or None if all are completed/fatal
+            Next pending/in_progress task, or None if all are completed/failed
         """
         for task in self.tasks:
             if task.status in ["pending", "in_progress"]:
                 return task
+        return None
+
+    def find_completed_duplicate(self, task: SubTask) -> Optional[SubTask]:
+        """
+        Find a completed task with the same title as the given task.
+
+        A match means the system already applied this fix but the problem recurred,
+        indicating a circular loop the agent cannot resolve on its own.
+
+        Args:
+            task: The task about to be executed
+
+        Returns:
+            The matching completed task, or None if no duplicate found
+        """
+        for t in self.tasks:
+            if t.id != task.id and t.status == "completed" and t.title == task.title:
+                return t
         return None
 
     def update_task_status(self, task_id: str, status: str):
