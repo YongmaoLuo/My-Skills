@@ -16,8 +16,6 @@ from task import SubTask
 class TaskManager:
     """Manages task state and persistence."""
 
-    MAX_TASK_ERRORS = 3  # Stop and request user help after this many persistent failures
-
     def __init__(self, project_dir: Path):
         self.tasks_file = project_dir / "tasks.json"
         self.tasks: List[SubTask] = []
@@ -35,13 +33,11 @@ class TaskManager:
             data = json.load(f)
 
         _TASK_FIELDS = {"id", "title", "description", "test_command", "status",
-                        "updated_time", "error_count", "last_error", "failure_reason"}
+                        "updated_time", "failure_reason"}
 
         def _make_task(t: dict) -> SubTask:
             task_dict = {k: v for k, v in t.items() if k in _TASK_FIELDS}
             task_dict.setdefault("updated_time", None)
-            task_dict.setdefault("error_count", 0)
-            task_dict.setdefault("last_error", None)
             task_dict.setdefault("failure_reason", None)
             return SubTask(**task_dict)
 
@@ -124,32 +120,21 @@ class TaskManager:
                 break
         self.save_tasks()
 
-    def record_task_error(self, task_id: str, error: str) -> bool:
+    def record_task_failure(self, task_id: str, error: str):
         """
-        Increment the persistent error count for a task.
+        Mark a task as failed and record the failure reason.
 
-        Returns True if the task has now reached MAX_TASK_ERRORS (fatal),
-        in which case the task status is set to 'fatal' and failure_reason
-        is recorded.
+        Args:
+            task_id: Task ID to mark as failed
+            error: Error message to record as failure_reason
         """
         for task in self.tasks:
             if task.id == task_id:
-                task.error_count += 1
-                task.last_error = error[:1000]
+                task.status = "failed"
+                task.failure_reason = error[:1000]
                 task.updated_time = datetime.utcnow().isoformat()
-                if task.error_count >= self.MAX_TASK_ERRORS:
-                    task.status = "fatal"
-                    task.failure_reason = (
-                        f"Task failed {task.error_count} times and could not be resolved automatically. "
-                        f"Last error: {task.last_error}"
-                    )
-                    self.save_tasks()
-                    return True
-                else:
-                    task.status = "pending"
                 break
         self.save_tasks()
-        return False
     
     def set_stop_reason(self, reason: str, detail: Optional[str] = None):
         """

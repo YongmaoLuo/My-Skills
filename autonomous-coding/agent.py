@@ -24,14 +24,6 @@ from background_manager import BackgroundManager
 from rollback_manager import RollbackManager
 
 
-class FatalTaskError(Exception):
-    """Raised when a task has failed too many times and requires human intervention."""
-
-    def __init__(self, task_id: str, reason: str):
-        self.task_id = task_id
-        self.reason = reason
-        super().__init__(f"Task [{task_id}] fatally failed: {reason}")
-
 
 class AutonomousAgent:
     """Configurable autonomous agent for various task types."""
@@ -173,6 +165,27 @@ class AutonomousAgent:
             max_tasks: Maximum number of tasks to execute
             timeout: Timeout for each AI query in seconds
         """
+        # Detect tasks that failed in a previous run — the same task failing twice
+        # means the system cannot resolve it; stop and ask for human help.
+        previously_failed = [t for t in self.task_manager.tasks if t.status == "failed"]
+        if previously_failed:
+            task = previously_failed[0]
+            detail = (
+                f"Task [{task.id}] '{task.title}' failed in a previous run and failed again. "
+                f"{task.failure_reason or 'No error details recorded.'}"
+            )
+            self.task_manager.set_stop_reason("repeated_failure", detail)
+            print(f"\n{'=' * 60}")
+            print(f"AUTONOMOUS CODING STOPPED — HUMAN INTERVENTION REQUIRED")
+            print(f"{'=' * 60}")
+            print(f"Task [{task.id}] '{task.title}' failed in a previous run.")
+            print(f"The system cannot resolve this automatically.")
+            print(f"\nReason recorded in tasks.json:")
+            print(f"  {task.failure_reason or 'See tasks.json for details.'}")
+            print(f"\nPlease fix the underlying issue and re-run.")
+            print(f"{'=' * 60}\n")
+            return
+
         total_tasks = len(self.task_manager.tasks)
         completed_tasks = sum(1 for t in self.task_manager.tasks if t.status == "completed")
         task_count = 0
@@ -190,25 +203,7 @@ class AutonomousAgent:
                 break
 
             # Execute task with retry mechanism
-            try:
-                success = self._execute_task_with_retry(task, max_retries=self.config.max_retries, timeout=timeout)
-            except FatalTaskError as e:
-                detail = (
-                    f"Task [{e.task_id}] failed {self.task_manager.MAX_TASK_ERRORS} times. "
-                    f"{e.reason}"
-                )
-                self.task_manager.set_stop_reason("repeated_failure", detail)
-                print(f"\n{'=' * 60}")
-                print(f"AUTONOMOUS CODING STOPPED — HUMAN INTERVENTION REQUIRED")
-                print(f"{'=' * 60}")
-                print(f"Task [{e.task_id}] has failed {self.task_manager.MAX_TASK_ERRORS} times "
-                      f"and the system cannot resolve it automatically.")
-                print(f"\nReason recorded in tasks.json:")
-                print(f"  {e.reason}")
-                print(f"\nPlease inspect tasks.json for the full failure context,")
-                print(f"fix the underlying issue, and re-run with --recover.")
-                print(f"{'=' * 60}\n")
-                break
+            success = self._execute_task_with_retry(task, max_retries=self.config.max_retries, timeout=timeout)
             task_count += 1
 
             # Update total tasks count after potential refinement
@@ -225,12 +220,10 @@ class AutonomousAgent:
 
         Returns:
             True if task completed successfully, False if it failed.
-            Raises FatalTaskError if the task has persistently failed MAX_TASK_ERRORS times.
         """
         for attempt in range(max_retries):
             try:
-                print(f"\n--- Processing Task [{task.id}] (Attempt {attempt + 1}/{max_retries}, "
-                      f"total errors: {task.error_count}): {task.title} ---")
+                print(f"\n--- Processing Task [{task.id}] (Attempt {attempt + 1}/{max_retries}): {task.title} ---")
                 self.task_manager.update_task_status(task.id, "in_progress")
 
                 # Get context and add retry modifier if this is a retry
@@ -238,14 +231,9 @@ class AutonomousAgent:
                 context = f"Subtask: {task.description}\nTest Command: {task.test_command}\n"
                 context += f"\nCurrent codebase:\n{file_context}\n"
 
-                # Add retry context if this is a retry attempt (in-run or cross-run)
-                if attempt > 0 or task.error_count > 0:
+                # Add retry context if this is a retry attempt within the current run
+                if attempt > 0:
                     retry_modifier = self.retry_manager.get_retry_prompt_modifier(task.id)
-                    if task.last_error and not retry_modifier:
-                        retry_modifier = (
-                            f"\n\n[PREVIOUS RUN ERROR]\nThis task failed in a previous run with:\n"
-                            f"{task.last_error}\nPlease try a different approach."
-                        )
                     context += retry_modifier
 
                 # Use config's executor prompt
@@ -283,9 +271,7 @@ class AutonomousAgent:
 
                     print("Max retries reached after timeouts, breaking down task...")
                     self._breakdown_failed_task(task, error_msg)
-                    fatal = self.task_manager.record_task_error(task.id, error_msg)
-                    if fatal:
-                        raise FatalTaskError(task.id, task.failure_reason or error_msg)
+                    self.task_manager.record_task_failure(task.id, error_msg)
                     return False
 
                 if coder_response is None:
@@ -294,9 +280,7 @@ class AutonomousAgent:
                     self.retry_manager.record_attempt(task.id, error_msg, False)
                     if attempt < max_retries - 1:
                         continue
-                    fatal = self.task_manager.record_task_error(task.id, error_msg)
-                    if fatal:
-                        raise FatalTaskError(task.id, task.failure_reason or error_msg)
+                    self.task_manager.record_task_failure(task.id, error_msg)
                     return False
 
                 # Apply file changes
@@ -352,15 +336,10 @@ class AutonomousAgent:
                         print("Retrying with refined approach...")
                         continue
 
-                    # All in-run retries exhausted — record persistent error
+                    # All in-run retries exhausted — mark as failed for cross-run detection
                     print("All retries exhausted for this run.")
-                    fatal = self.task_manager.record_task_error(task.id, error_msg)
-                    if fatal:
-                        raise FatalTaskError(task.id, task.failure_reason or error_msg)
+                    self.task_manager.record_task_failure(task.id, error_msg)
                     return False
-
-            except FatalTaskError:
-                raise  # propagate upward to stop the run
 
             except Exception as e:
                 print(f"An unexpected error occurred while processing task: {e}")
@@ -371,9 +350,7 @@ class AutonomousAgent:
                     print("Retrying after error...")
                     continue
 
-                fatal = self.task_manager.record_task_error(task.id, error_msg)
-                if fatal:
-                    raise FatalTaskError(task.id, task.failure_reason or error_msg)
+                self.task_manager.record_task_failure(task.id, error_msg)
                 return False
 
         return False

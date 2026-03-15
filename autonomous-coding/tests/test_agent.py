@@ -1,17 +1,17 @@
-"""Unit tests for AutonomousAgent — task execution, fatal stopping, and run loop."""
+"""Unit tests for AutonomousAgent — task execution, repeated-failure stopping, and run loop."""
 
 import json
 import os
 import sys
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from task import SubTask
 from task_manager import TaskManager
-from agent import AutonomousAgent, FatalTaskError
+from agent import AutonomousAgent
 from coding_tool import CodingTool
 from config_registry import ConfigRegistry
 
@@ -49,25 +49,12 @@ def _make_agent(tasks_data=None, requirement="req"):
 
 
 def _task_dict(id="1", title="T", description="D", test_cmd="echo ok",
-               status="pending", error_count=0):
+               status="pending", failure_reason=None):
     return {
         "id": id, "title": title, "description": description,
         "test_command": test_cmd, "status": status,
-        "error_count": error_count, "last_error": None,
-        "failure_reason": None, "updated_time": None,
+        "failure_reason": failure_reason, "updated_time": None,
     }
-
-
-# ---------------------------------------------------------------------------
-# FatalTaskError
-# ---------------------------------------------------------------------------
-
-class TestFatalTaskError:
-    def test_attributes(self):
-        err = FatalTaskError("task-1", "something broke")
-        assert err.task_id == "task-1"
-        assert err.reason == "something broke"
-        assert "task-1" in str(err)
 
 
 # ---------------------------------------------------------------------------
@@ -104,51 +91,76 @@ class TestExecuteTaskFailure:
     def test_returns_false_after_all_retries(self):
         agent, _ = _make_agent([_task_dict(id="1")])
         agent.executor.run_command = MagicMock(return_value=(1, "Build failed"))
-        # Prevent refiner from changing tasks
         agent.refiner.refine = MagicMock(return_value=[_task_dict(id="1")])
         task = agent.task_manager.tasks[0]
         result = agent._execute_task_with_retry(task, max_retries=2)
         assert result is False
 
-    def test_increments_error_count_on_exhausted_retries(self):
+    def test_marks_task_failed_after_all_retries(self):
         agent, _ = _make_agent([_task_dict(id="1")])
         agent.executor.run_command = MagicMock(return_value=(1, "error"))
         agent.refiner.refine = MagicMock(return_value=[_task_dict(id="1")])
         task = agent.task_manager.tasks[0]
         agent._execute_task_with_retry(task, max_retries=1)
-        assert agent.task_manager.tasks[0].error_count == 1
+        assert agent.task_manager.tasks[0].status == "failed"
 
-    def test_raises_fatal_error_after_max_persistent_failures(self):
-        # Seed error_count at threshold - 1 so one more failure triggers fatal
-        threshold = TaskManager.MAX_TASK_ERRORS
-        agent, _ = _make_agent([_task_dict(id="1", error_count=threshold - 1)])
-        agent.executor.run_command = MagicMock(return_value=(1, "persistent error"))
-        agent.refiner.refine = MagicMock(return_value=[_task_dict(id="1", error_count=threshold - 1)])
+    def test_records_failure_reason_in_tasks_json(self):
+        agent, tmp = _make_agent([_task_dict(id="1")])
+        agent.executor.run_command = MagicMock(return_value=(1, "build error msg"))
+        agent.refiner.refine = MagicMock(return_value=[_task_dict(id="1")])
         task = agent.task_manager.tasks[0]
-        try:
-            agent._execute_task_with_retry(task, max_retries=1)
-            assert False, "Expected FatalTaskError"
-        except FatalTaskError as e:
-            assert e.task_id == "1"
-
-    def test_fatal_task_has_failure_reason_in_tasks_json(self):
-        threshold = TaskManager.MAX_TASK_ERRORS
-        agent, tmp = _make_agent([_task_dict(id="1", error_count=threshold - 1)])
-        agent.executor.run_command = MagicMock(return_value=(1, "fatal error msg"))
-        agent.refiner.refine = MagicMock(return_value=[_task_dict(id="1", error_count=threshold - 1)])
-        task = agent.task_manager.tasks[0]
-        try:
-            agent._execute_task_with_retry(task, max_retries=1)
-        except FatalTaskError:
-            pass
-        # Reload from disk
+        agent._execute_task_with_retry(task, max_retries=1)
         tm2 = TaskManager(tmp)
-        assert tm2.tasks[0].status == "fatal"
+        assert tm2.tasks[0].status == "failed"
         assert tm2.tasks[0].failure_reason is not None
 
 
 # ---------------------------------------------------------------------------
-# run() — loop control
+# run() — repeated-failure detection
+# ---------------------------------------------------------------------------
+
+class TestRunRepeatedFailureDetection:
+    def test_stops_immediately_when_failed_task_in_tasks_json(self):
+        """Second run: a previously failed task triggers immediate stop."""
+        tasks = [
+            _task_dict(id="1", status="failed", failure_reason="build broke"),
+            _task_dict(id="2", status="pending"),
+        ]
+        agent, _ = _make_agent(tasks)
+        agent.run(timeout=None)
+        # Task 2 must never be attempted
+        assert agent.task_manager.tasks[1].status == "pending"
+
+    def test_records_repeated_failure_stop_reason(self):
+        tasks = [_task_dict(id="1", status="failed", failure_reason="old error")]
+        agent, tmp = _make_agent(tasks)
+        agent.run(timeout=None)
+        tm2 = TaskManager(tmp)
+        assert tm2.stop_reason == "repeated_failure"
+        assert tm2.reason_detail is not None
+        assert "1" in tm2.reason_detail
+
+    def test_first_run_can_fail_task_and_continue_others(self):
+        """Within a single run, a failing task is marked failed but others proceed."""
+        tasks = [
+            _task_dict(id="1", status="pending"),
+            _task_dict(id="2", status="pending"),
+        ]
+        agent, _ = _make_agent(tasks)
+        agent.config.max_retries = 1  # one attempt per task so mocks are predictable
+        # Task 1 fails, task 2 succeeds
+        agent.executor.run_command = MagicMock(side_effect=[
+            (1, "task1 error"),
+            (0, "Tests passed"),
+        ])
+        agent.refiner.refine = MagicMock(return_value=tasks)
+        agent.run(max_tasks=10, timeout=None)
+        assert agent.task_manager.tasks[0].status == "failed"
+        assert agent.task_manager.tasks[1].status == "completed"
+
+
+# ---------------------------------------------------------------------------
+# run() — normal flow
 # ---------------------------------------------------------------------------
 
 class TestRunLoop:
@@ -165,30 +177,12 @@ class TestRunLoop:
         completed = sum(1 for t in agent.task_manager.tasks if t.status == "completed")
         assert completed == 2
 
-    def test_run_stops_on_fatal_task(self):
-        threshold = TaskManager.MAX_TASK_ERRORS
-        tasks = [
-            _task_dict(id="1", error_count=threshold - 1),
-            _task_dict(id="2"),
-        ]
-        agent, _ = _make_agent(tasks)
-        agent.executor.run_command = MagicMock(return_value=(1, "fatal error"))
-        agent.refiner.refine = MagicMock(return_value=tasks)
+    def test_sets_success_stop_reason_when_all_complete(self):
+        tasks = [_task_dict(id="1")]
+        agent, tmp = _make_agent(tasks)
         agent.run(timeout=None)
-        # Task 2 should never have been attempted (still pending)
-        assert agent.task_manager.tasks[1].status == "pending"
-
-    def test_run_skips_fatal_tasks_on_recover(self):
-        """After a fatal, reloading with --recover should not re-attempt fatal tasks."""
-        threshold = TaskManager.MAX_TASK_ERRORS
-        agent, tmp = _make_agent([
-            _task_dict(id="1", status="fatal", error_count=threshold),
-            _task_dict(id="2"),
-        ])
-        agent.run(timeout=None)
-        # Only task 2 should complete; task 1 stays fatal
-        assert agent.task_manager.tasks[0].status == "fatal"
-        assert agent.task_manager.tasks[1].status == "completed"
+        tm2 = TaskManager(tmp)
+        assert tm2.stop_reason == "success"
 
 
 # ---------------------------------------------------------------------------

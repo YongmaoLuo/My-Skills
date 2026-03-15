@@ -24,11 +24,10 @@ def _make_manager(tasks_data=None, requirement="test req") -> tuple:
 
 
 def _task_dict(id="1", title="T", description="D", test_cmd="echo ok",
-               status="pending", error_count=0, last_error=None, failure_reason=None):
+               status="pending", failure_reason=None):
     return {
         "id": id, "title": title, "description": description,
         "test_command": test_cmd, "status": status,
-        "error_count": error_count, "last_error": last_error,
         "failure_reason": failure_reason, "updated_time": None
     }
 
@@ -50,7 +49,7 @@ class TestTaskManagerLoad:
         assert tm.tasks[1].id == "2"
 
     def test_defaults_missing_fields_on_load(self):
-        # tasks.json without new fields (legacy format)
+        # tasks.json without optional fields (legacy format)
         tmp = tempfile.mkdtemp()
         path = Path(tmp)
         legacy = [{"id": "1", "title": "T", "description": "D",
@@ -58,8 +57,6 @@ class TestTaskManagerLoad:
         with open(path / "tasks.json", "w") as f:
             json.dump({"requirement": "r", "tasks": legacy}, f)
         tm = TaskManager(path)
-        assert tm.tasks[0].error_count == 0
-        assert tm.tasks[0].last_error is None
         assert tm.tasks[0].failure_reason is None
 
     def test_loads_list_format(self):
@@ -71,6 +68,15 @@ class TestTaskManagerLoad:
         tm = TaskManager(path)
         assert len(tm.tasks) == 1
 
+    def test_loads_stop_reason(self):
+        tmp = tempfile.mkdtemp()
+        path = Path(tmp)
+        with open(path / "tasks.json", "w") as f:
+            json.dump({"requirement": "r", "stop_reason": "success",
+                       "reason_detail": None, "tasks": []}, f)
+        tm = TaskManager(path)
+        assert tm.stop_reason == "success"
+
 
 class TestTaskManagerSave:
     def test_save_and_reload(self):
@@ -81,12 +87,12 @@ class TestTaskManagerSave:
         assert tm2.tasks[0].status == "completed"
         assert tm2.requirement == "req1"
 
-    def test_save_preserves_error_count(self):
+    def test_save_preserves_failure_reason(self):
         path, tm = _make_manager([_task_dict(id="1")])
-        tm.tasks[0].error_count = 2
+        tm.tasks[0].failure_reason = "build error"
         tm.save_tasks()
         tm2 = TaskManager(path)
-        assert tm2.tasks[0].error_count == 2
+        assert tm2.tasks[0].failure_reason == "build error"
 
 
 class TestGetNextTask:
@@ -105,8 +111,8 @@ class TestGetNextTask:
         _, tm = _make_manager([_task_dict(id="1", status="completed")])
         assert tm.get_next_task() is None
 
-    def test_skips_fatal_task(self):
-        _, tm = _make_manager([_task_dict(id="1", status="fatal")])
+    def test_skips_failed_task(self):
+        _, tm = _make_manager([_task_dict(id="1", status="failed")])
         assert tm.get_next_task() is None
 
     def test_returns_none_when_all_done(self):
@@ -143,47 +149,35 @@ class TestUpdateTaskStatus:
         assert tm2.tasks[0].status == "completed"
 
 
-class TestRecordTaskError:
-    def test_increments_error_count(self):
+class TestRecordTaskFailure:
+    def test_marks_task_failed(self):
         _, tm = _make_manager([_task_dict(id="1")])
-        tm.record_task_error("1", "some error")
-        assert tm.tasks[0].error_count == 1
-        assert tm.tasks[0].last_error == "some error"
+        tm.record_task_failure("1", "build error")
+        assert tm.tasks[0].status == "failed"
 
-    def test_returns_false_below_threshold(self):
+    def test_records_failure_reason(self):
         _, tm = _make_manager([_task_dict(id="1")])
-        result = tm.record_task_error("1", "err")
-        assert result is False
-        assert tm.tasks[0].status == "pending"
-
-    def test_returns_true_at_threshold(self):
-        _, tm = _make_manager([_task_dict(id="1", error_count=2)])
-        result = tm.record_task_error("1", "err again")
-        assert result is True
-
-    def test_sets_fatal_status_at_threshold(self):
-        _, tm = _make_manager([_task_dict(id="1", error_count=2)])
-        tm.record_task_error("1", "final error")
-        assert tm.tasks[0].status == "fatal"
-
-    def test_sets_failure_reason_at_threshold(self):
-        _, tm = _make_manager([_task_dict(id="1", error_count=2)])
-        tm.record_task_error("1", "final error")
-        assert tm.tasks[0].failure_reason is not None
-        assert "final error" in tm.tasks[0].failure_reason
-
-    def test_fatal_persists_to_file(self):
-        path, tm = _make_manager([_task_dict(id="1", error_count=2)])
-        tm.record_task_error("1", "kaboom")
-        tm2 = TaskManager(path)
-        assert tm2.tasks[0].status == "fatal"
-        assert tm2.tasks[0].failure_reason is not None
+        tm.record_task_failure("1", "test output failure")
+        assert tm.tasks[0].failure_reason == "test output failure"
 
     def test_truncates_long_error(self):
         _, tm = _make_manager([_task_dict(id="1")])
         long_error = "x" * 2000
-        tm.record_task_error("1", long_error)
-        assert len(tm.tasks[0].last_error) <= 1000
+        tm.record_task_failure("1", long_error)
+        assert len(tm.tasks[0].failure_reason) <= 1000
+
+    def test_persists_to_file(self):
+        path, tm = _make_manager([_task_dict(id="1")])
+        tm.record_task_failure("1", "kaboom")
+        tm2 = TaskManager(path)
+        assert tm2.tasks[0].status == "failed"
+        assert tm2.tasks[0].failure_reason == "kaboom"
+
+    def test_sets_updated_time(self):
+        _, tm = _make_manager([_task_dict(id="1")])
+        assert tm.tasks[0].updated_time is None
+        tm.record_task_failure("1", "err")
+        assert tm.tasks[0].updated_time is not None
 
 
 class TestSetTasks:
@@ -207,6 +201,27 @@ class TestSetTasks:
         _, tm = _make_manager()
         tm.set_tasks([_task_dict(id="1")], requirement="new req")
         assert tm.requirement == "new req"
+
+
+class TestSetStopReason:
+    def test_sets_success(self):
+        _, tm = _make_manager()
+        tm.set_stop_reason("success")
+        assert tm.stop_reason == "success"
+        assert tm.reason_detail is None
+
+    def test_sets_repeated_failure_with_detail(self):
+        _, tm = _make_manager()
+        tm.set_stop_reason("repeated_failure", "task-1 failed again")
+        assert tm.stop_reason == "repeated_failure"
+        assert tm.reason_detail == "task-1 failed again"
+
+    def test_persists_to_file(self):
+        path, tm = _make_manager()
+        tm.set_stop_reason("repeated_failure", "detail here")
+        tm2 = TaskManager(path)
+        assert tm2.stop_reason == "repeated_failure"
+        assert tm2.reason_detail == "detail here"
 
 
 class TestAddTask:

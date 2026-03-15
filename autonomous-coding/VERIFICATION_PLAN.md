@@ -4,12 +4,12 @@
 
 Two guarantees must hold after this feature branch is merged:
 
-1. **Fatal failure detection works** — a task that fails 3 times across runs gets
-   status `"fatal"`, has `failure_reason` written per-task, and the top-level
-   `stop_reason`/`reason_detail` fields are written to `tasks.json`. The run stops
-   with a human-readable intervention message.
-2. **End-to-end workflow is unbroken** — the normal planning → execution → commit
-   path still works, and on clean completion `stop_reason` is `"success"`.
+1. **Repeated-failure detection works** — a task that fails in one run is marked `"failed"`
+   with `failure_reason` written to disk. On the next run, detecting that failed task causes
+   an immediate stop: `stop_reason="repeated_failure"` and `reason_detail` are written to
+   `tasks.json`, and a human-readable intervention message is printed.
+2. **End-to-end workflow is unbroken** — the normal planning → execution → commit path still
+   works, and on clean completion `stop_reason` is `"success"`.
 
 ---
 
@@ -28,36 +28,34 @@ Every run leaves a fully-described `tasks.json`. The top-level structure is:
 
 | `stop_reason` | When written | `reason_detail` |
 |---|---|---|
-| `"success"` | All tasks completed with no fatal | `null` |
-| `"repeated_failure"` | A task reached `MAX_TASK_ERRORS` (3) | `"Task [id] failed N times. <last_error>"` |
+| `"success"` | All tasks completed | `null` |
+| `"repeated_failure"` | A previously-failed task detected at run start | `"Task [id] '<title>' failed in a previous run. <failure_reason>"` |
 | `null` | Run still in progress or interrupted externally | `null` |
 
-Per-task fields added by this feature:
+Per-task fields:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `error_count` | int | Number of times this task has exhausted all in-run retries across runs |
-| `last_error` | str \| null | Most recent error message (truncated to 1000 chars) |
-| `failure_reason` | str \| null | Set when `status = "fatal"` — why autonomous-coding gave up on this task |
+| `failure_reason` | str \| null | Set when `status = "failed"` — the error output that caused the failure (truncated to 1000 chars) |
 
 ---
 
 ## Key Implementation Facts (Code Map)
 
-- `TaskManager.MAX_TASK_ERRORS = 3`
-- `record_task_error(id, error)`: increments `error_count`, caps `last_error` at 1000 chars.
-  At threshold → `status="fatal"`, writes `failure_reason`, returns `True`. Below threshold →
-  `status="pending"`, returns `False`.
+- `record_task_failure(id, error)`: marks `status="failed"`, sets `failure_reason` (truncated
+  to 1000 chars), sets `updated_time`, saves to disk.
 - `set_stop_reason(reason, detail)`: sets top-level `stop_reason`/`reason_detail` and saves.
-- `run()`: calls `set_stop_reason("repeated_failure", ...)` on `FatalTaskError`; calls
-  `set_stop_reason("success")` when `get_next_task()` returns `None`.
-- `get_next_task()`: skips `"fatal"` and `"completed"` — only returns `"pending"` or `"in_progress"`.
-- `_execute_task_with_retry()`: calls `record_task_error()` once per in-run retry exhaustion;
-  raises `FatalTaskError` if fatal threshold reached.
+- `run()`: at startup scans all tasks for `status == "failed"`. If any found → calls
+  `set_stop_reason("repeated_failure", ...)`, prints intervention banner, returns immediately.
+  On clean completion calls `set_stop_reason("success")`.
+- `get_next_task()`: skips `"failed"` and `"completed"` — only returns `"pending"` or
+  `"in_progress"` tasks.
+- `_execute_task_with_retry()`: on in-run retry exhaustion → calls `record_task_failure()`
+  and returns `False`. The run continues with remaining tasks in the same run.
 
 ---
 
-## Part A: Automated Unit Tests (80 tests)
+## Part A: Automated Unit Tests (82 tests)
 
 ### A.1 Run the Full Suite
 
@@ -67,81 +65,23 @@ python3 -m pytest tests/ -v --tb=short 2>&1 | tee pytest_output.txt
 echo "Exit code: $?"
 ```
 
-**Expected**: 80/80 passed, exit code 0.
+**Expected**: 82/82 passed, exit code 0.
 
 **Critical tests:**
 
 | Test | What It Verifies |
 |---|---|
-| `TestRecordTaskError::test_returns_true_at_threshold` | `record_task_error` returns `True` at count=3 |
-| `TestRecordTaskError::test_fatal_persists_to_file` | `status="fatal"` + `failure_reason` survive a `TaskManager` reload |
-| `TestRecordTaskError::test_truncates_long_error` | 1000-char cap on `last_error` |
-| `TestExecuteTaskFailure::test_raises_fatal_error_after_max_persistent_failures` | Agent raises `FatalTaskError` at threshold |
-| `TestExecuteTaskFailure::test_fatal_task_has_failure_reason_in_tasks_json` | `tasks.json` on disk has `failure_reason` after fatal |
-| `TestRunLoop::test_run_stops_on_fatal_task` | Second task stays `"pending"` when first goes fatal |
-| `TestRunLoop::test_run_skips_fatal_tasks_on_recover` | Pre-existing fatal task skipped; next task completes |
+| `TestRecordTaskFailure::test_marks_task_failed` | `record_task_failure` sets `status="failed"` |
+| `TestRecordTaskFailure::test_records_failure_reason` | `failure_reason` recorded on disk |
+| `TestRecordTaskFailure::test_truncates_long_error` | 1000-char cap on `failure_reason` |
+| `TestGetNextTask::test_skips_failed_task` | `get_next_task` skips `"failed"` tasks |
+| `TestExecuteTaskFailure::test_marks_failed_after_all_retries` | task status is `"failed"` after retry exhaustion |
+| `TestExecuteTaskFailure::test_records_failure_reason_in_tasks_json` | `failure_reason` in `tasks.json` after failure |
+| `TestRunRepeatedFailureDetection::test_stops_immediately_when_failed_task_in_tasks_json` | second task untouched when run detects previous failure |
+| `TestRunRepeatedFailureDetection::test_records_repeated_failure_stop_reason` | `stop_reason="repeated_failure"` written to disk |
+| `TestRunRepeatedFailureDetection::test_first_run_can_fail_task_and_continue_others` | within one run, failing task marked failed but others complete |
+| `TestRunLoop::test_sets_success_stop_reason_when_all_complete` | `stop_reason="success"` on clean completion |
 | `TestClaudeCodingTool::test_query_calls_claude_cli` | `--dangerously-skip-permissions` and `-p` are in the subprocess command |
-
-### A.2 Gap Unit Scenarios (add to existing test files)
-
-**A2-1 — `get_next_task` skips `"failed"` status:**
-```python
-def test_skips_failed_task(self):
-    _, tm = _make_manager([_task_dict(id="1", status="failed")])
-    assert tm.get_next_task() is None
-```
-
-**A2-2 — `[completed, fatal, pending]` returns the pending task:**
-```python
-def test_returns_pending_after_fatal_and_completed(self):
-    data = [_task_dict(id="1", status="completed"),
-            _task_dict(id="2", status="fatal"),
-            _task_dict(id="3", status="pending")]
-    _, tm = _make_manager(data)
-    assert tm.get_next_task().id == "3"
-```
-
-**A2-3 — `record_task_error` with non-existent task ID:**
-```python
-def test_nonexistent_task_id_returns_false(self):
-    _, tm = _make_manager([_task_dict(id="1")])
-    assert tm.record_task_error("999", "err") is False
-    assert tm.tasks[0].error_count == 0
-```
-
-**A2-4 — `error_count` already at threshold on load still triggers fatal:**
-```python
-def test_error_count_beyond_threshold_still_triggers_fatal(self):
-    _, tm = _make_manager([_task_dict(id="1", error_count=3)])
-    assert tm.record_task_error("1", "err") is True
-    assert tm.tasks[0].status == "fatal"
-```
-
-**A2-5 — `"in_progress"` task reset to `"pending"` below threshold:**
-```python
-def test_in_progress_task_reset_to_pending_below_threshold(self):
-    _, tm = _make_manager([_task_dict(id="1", status="in_progress", error_count=1)])
-    tm.record_task_error("1", "err")
-    assert tm.tasks[0].status == "pending"
-    assert tm.tasks[0].error_count == 2
-```
-
-**A2-6 — `set_stop_reason` persists to disk and is reloaded:**
-```python
-def test_set_stop_reason_persists(self):
-    path, tm = _make_manager([_task_dict(id="1")])
-    tm.set_stop_reason("repeated_failure", "Task [1] failed 3 times. error msg")
-    tm2 = TaskManager(path)
-    assert tm2.stop_reason == "repeated_failure"
-    assert "Task [1]" in tm2.reason_detail
-
-def test_set_stop_reason_success(self):
-    path, tm = _make_manager([_task_dict(id="1")])
-    tm.set_stop_reason("success")
-    tm2 = TaskManager(path)
-    assert tm2.stop_reason == "success"
-    assert tm2.reason_detail is None
-```
 
 ---
 
@@ -160,13 +100,10 @@ from unittest.mock import MagicMock, patch
 def run_agent_with_fixture(tasks_json: dict, executor_returns: list):
     """
     executor_returns: list of (exit_code, output) tuples, consumed in order.
-    Returns the final tasks.json dict.
+    Returns the final tasks.json dict and the tmp Path.
     """
     tmp = Path(tempfile.mkdtemp())
     (tmp / "tasks.json").write_text(json.dumps(tasks_json))
-    # git init so GitManager doesn't fail
-    import subprocess; subprocess.run(["git", "init"], cwd=tmp, capture_output=True)
-    subprocess.run(["git", "commit", "--allow-empty", "-m", "init"], cwd=tmp, capture_output=True)
 
     from agent import AutonomousAgent
     from coding_tool import CodingTool
@@ -188,6 +125,7 @@ def run_agent_with_fixture(tasks_json: dict, executor_returns: list):
             coding_tool=mock_tool,
             config=ConfigRegistry.get("coding")
         )
+    agent.config.max_retries = 1  # one attempt per task for predictable mocks
     agent.executor.run_command = mock_run_command
     agent.run(timeout=None)
 
@@ -196,174 +134,25 @@ def run_agent_with_fixture(tasks_json: dict, executor_returns: list):
 
 ---
 
-### B.1 — First-Run Failure Accumulation (error_count = 1, not yet fatal)
+### B.1 — First-Run Failure: Task Marked `"failed"`, Run Continues
 
 **Fixture** (`tasks.json`):
 ```json
 {
   "requirement": "test failure tracking",
   "stop_reason": null, "reason_detail": null,
-  "tasks": [{
-    "id": "1", "title": "Task that fails", "description": "will fail",
-    "test_command": "exit 1", "status": "pending",
-    "error_count": 0, "last_error": null, "failure_reason": null, "updated_time": null
-  }]
-}
-```
-
-**Executor mock**: always returns `(1, "compile error on line 5")`.
-**`max_retries=1`** to exhaust in one attempt.
-
-**Expected `tasks.json` after run:**
-```json
-{
-  "stop_reason": null,
-  "reason_detail": null,
-  "tasks": [{ "id": "1", "status": "pending", "error_count": 1,
-              "last_error": "compile error on line 5", "failure_reason": null }]
-}
-```
-
-**Checks:**
-- `stop_reason` is still `null` (not fatal yet — needs 2 more failures).
-- `error_count == 1`.
-- `failure_reason` is `null`.
-- `status == "pending"` (ready to retry in the next run).
-
----
-
-### B.2 — Second-Run Failure Accumulation (error_count = 2, not yet fatal)
-
-**Fixture**: Same as B.1 output — i.e., `error_count=1, status="pending"`.
-```json
-{
-  "requirement": "test failure tracking",
-  "stop_reason": null, "reason_detail": null,
-  "tasks": [{
-    "id": "1", "title": "Task that fails", "description": "will fail",
-    "test_command": "exit 1", "status": "pending",
-    "error_count": 1, "last_error": "compile error on line 5",
-    "failure_reason": null, "updated_time": "2026-03-15T00:00:00"
-  }]
-}
-```
-
-**Executor mock**: `(1, "undefined symbol foo")`.
-
-**Expected `tasks.json` after run:**
-```json
-{
-  "stop_reason": null,
-  "reason_detail": null,
-  "tasks": [{ "id": "1", "status": "pending", "error_count": 2,
-              "last_error": "undefined symbol foo", "failure_reason": null }]
-}
-```
-
-**Checks:**
-- `error_count == 2`.
-- `stop_reason` is still `null`.
-- `last_error` updated to the new error message.
-
----
-
-### B.3 — Third-Run Fatal Trigger (PRIMARY FEATURE)
-
-**Fixture**: B.2 output — `error_count=2, status="pending"`.
-```json
-{
-  "requirement": "test failure tracking",
-  "stop_reason": null, "reason_detail": null,
-  "tasks": [{
-    "id": "1", "title": "Task that fails", "description": "will fail",
-    "test_command": "exit 1", "status": "pending",
-    "error_count": 2, "last_error": "undefined symbol foo",
-    "failure_reason": null, "updated_time": "2026-03-15T00:00:00"
-  }]
-}
-```
-
-**Executor mock**: `(1, "linker error: missing library")`.
-
-**Expected `tasks.json` after run:**
-```json
-{
-  "stop_reason": "repeated_failure",
-  "reason_detail": "Task [1] failed 3 times. Task failed 3 times and could not be resolved automatically. Last error: linker error: missing library",
-  "tasks": [{
-    "id": "1", "status": "fatal", "error_count": 3,
-    "last_error": "linker error: missing library",
-    "failure_reason": "Task failed 3 times and could not be resolved automatically. Last error: linker error: missing library"
-  }]
-}
-```
-
-**Checks:**
-- `stop_reason == "repeated_failure"`.
-- `reason_detail` is non-null and contains `"Task [1]"` and the error text.
-- Per-task: `status == "fatal"`, `error_count == 3`, `failure_reason` non-null.
-- Stdout contains the intervention banner with `"HUMAN INTERVENTION REQUIRED"`.
-
----
-
-### B.4 — Multi-Task Run: Fatal on Task 1 Does Not Touch Task 2
-
-**Fixture**: Two tasks — task 1 at `error_count=2`, task 2 at `error_count=0`:
-```json
-{
-  "requirement": "two tasks",
-  "stop_reason": null, "reason_detail": null,
   "tasks": [
-    { "id": "1", "title": "Fatal task", "description": "breaks", "test_command": "exit 1",
-      "status": "pending", "error_count": 2, "last_error": "prev error",
+    { "id": "1", "title": "Failing task", "description": "will fail",
+      "test_command": "exit 1", "status": "pending",
       "failure_reason": null, "updated_time": null },
-    { "id": "2", "title": "Healthy task", "description": "works", "test_command": "echo ok",
-      "status": "pending", "error_count": 0, "last_error": null,
+    { "id": "2", "title": "Passing task", "description": "will pass",
+      "test_command": "echo ok", "status": "pending",
       "failure_reason": null, "updated_time": null }
   ]
 }
 ```
 
-**Executor mock**: always returns `(1, "fatal error msg")`.
-
-**Expected `tasks.json` after run:**
-```json
-{
-  "stop_reason": "repeated_failure",
-  "reason_detail": "Task [1] failed 3 times. ...",
-  "tasks": [
-    { "id": "1", "status": "fatal", "error_count": 3 },
-    { "id": "2", "status": "pending", "error_count": 0 }
-  ]
-}
-```
-
-**Checks:**
-- Task 2 `status` unchanged (`"pending"`) — run stopped before reaching it.
-- `coding_tool.query` called only once (for task 1 only).
-
----
-
-### B.5 — Recovery with `--recover` After Fatal (`stop_reason` rewritten to `"success"`)
-
-**Fixture**: Task 1 fatal, task 2 pending:
-```json
-{
-  "requirement": "recovery test",
-  "stop_reason": "repeated_failure",
-  "reason_detail": "Task [1] failed 3 times. ...",
-  "tasks": [
-    { "id": "1", "title": "Broken", "description": "...", "test_command": "exit 1",
-      "status": "fatal", "error_count": 3, "last_error": "...",
-      "failure_reason": "Task failed 3 times...", "updated_time": "..." },
-    { "id": "2", "title": "Healthy", "description": "...", "test_command": "echo ok",
-      "status": "pending", "error_count": 0, "last_error": null,
-      "failure_reason": null, "updated_time": null }
-  ]
-}
-```
-
-**Run with `recover=True`**, executor returns `(0, "Tests passed")` for task 2.
+**Executor mock**: `[(1, "compile error on line 5"), (0, "Tests passed")]`.
 
 **Expected `tasks.json` after run:**
 ```json
@@ -371,21 +160,92 @@ def run_agent_with_fixture(tasks_json: dict, executor_returns: list):
   "stop_reason": "success",
   "reason_detail": null,
   "tasks": [
-    { "id": "1", "status": "fatal", "error_count": 3 },
-    { "id": "2", "status": "completed", "error_count": 0 }
+    { "id": "1", "status": "failed", "failure_reason": "compile error on line 5" },
+    { "id": "2", "status": "completed", "failure_reason": null }
   ]
 }
 ```
 
 **Checks:**
-- `stop_reason` overwritten from `"repeated_failure"` → `"success"` (all non-fatal tasks done).
-- `reason_detail` is `null`.
-- Task 1 unchanged (fatal stays fatal).
-- Task 2 completed; `git_manager.commit` called once.
+- `stop_reason == "success"` — run completed; task 2 was not blocked by task 1's failure.
+- Task 1: `status == "failed"`, `failure_reason` contains the error text.
+- Task 2: `status == "completed"`.
 
 ---
 
-### B.6 — Happy Path: All Tasks Succeed (`stop_reason = "success"`)
+### B.2 — Second Run: Failed Task Detected, Immediate Stop (PRIMARY FEATURE)
+
+**Fixture**: B.1 output — task 1 is `"failed"`, task 2 is `"completed"`. Add a new task 3.
+```json
+{
+  "requirement": "test failure tracking",
+  "stop_reason": "success", "reason_detail": null,
+  "tasks": [
+    { "id": "1", "title": "Failing task", "description": "will fail",
+      "test_command": "exit 1", "status": "failed",
+      "failure_reason": "compile error on line 5", "updated_time": "2026-03-15T00:00:00" },
+    { "id": "2", "title": "Passing task", "description": "done",
+      "test_command": "echo ok", "status": "completed",
+      "failure_reason": null, "updated_time": "2026-03-15T00:00:01" },
+    { "id": "3", "title": "New task", "description": "would run if not stopped",
+      "test_command": "echo ok", "status": "pending",
+      "failure_reason": null, "updated_time": null }
+  ]
+}
+```
+
+**Executor mock**: `[(0, "Tests passed")]` (would only be called if run doesn't stop early).
+
+**Expected `tasks.json` after run:**
+```json
+{
+  "stop_reason": "repeated_failure",
+  "reason_detail": "Task [1] 'Failing task' failed in a previous run and failed again. compile error on line 5",
+  "tasks": [
+    { "id": "1", "status": "failed" },
+    { "id": "2", "status": "completed" },
+    { "id": "3", "status": "pending" }
+  ]
+}
+```
+
+**Checks:**
+- `stop_reason == "repeated_failure"`.
+- `reason_detail` is non-null and contains `"Task [1]"` and the error text.
+- Task 3 `status` unchanged (`"pending"`) — run stopped before reaching it.
+- `executor.run_command` was **never called** (run exited before the task loop).
+- Stdout contains `"HUMAN INTERVENTION REQUIRED"`.
+
+---
+
+### B.3 — Multi-Task Run: Failed Task Detected Before Any Other Task Runs
+
+**Fixture**: Task 1 failed from a previous run, tasks 2 and 3 pending:
+```json
+{
+  "requirement": "multi-task test",
+  "stop_reason": null, "reason_detail": null,
+  "tasks": [
+    { "id": "1", "title": "Broken", "description": "already failed",
+      "test_command": "exit 1", "status": "failed",
+      "failure_reason": "linker error", "updated_time": "2026-03-15T00:00:00" },
+    { "id": "2", "title": "Task 2", "description": "pending",
+      "test_command": "echo ok", "status": "pending",
+      "failure_reason": null, "updated_time": null },
+    { "id": "3", "title": "Task 3", "description": "pending",
+      "test_command": "echo ok", "status": "pending",
+      "failure_reason": null, "updated_time": null }
+  ]
+}
+```
+
+**Expected `tasks.json` after run:**
+- `stop_reason == "repeated_failure"`.
+- Tasks 2 and 3 both still `"pending"` — no tasks executed.
+
+---
+
+### B.4 — Happy Path: All Tasks Succeed (`stop_reason = "success"`)
 
 **Fixture**: Two fresh pending tasks:
 ```json
@@ -394,11 +254,9 @@ def run_agent_with_fixture(tasks_json: dict, executor_returns: list):
   "stop_reason": null, "reason_detail": null,
   "tasks": [
     { "id": "1", "title": "Step 1", "description": "...", "test_command": "echo ok",
-      "status": "pending", "error_count": 0, "last_error": null,
-      "failure_reason": null, "updated_time": null },
+      "status": "pending", "failure_reason": null, "updated_time": null },
     { "id": "2", "title": "Step 2", "description": "...", "test_command": "echo ok",
-      "status": "pending", "error_count": 0, "last_error": null,
-      "failure_reason": null, "updated_time": null }
+      "status": "pending", "failure_reason": null, "updated_time": null }
   ]
 }
 ```
@@ -411,113 +269,110 @@ def run_agent_with_fixture(tasks_json: dict, executor_returns: list):
   "stop_reason": "success",
   "reason_detail": null,
   "tasks": [
-    { "id": "1", "status": "completed", "error_count": 0, "failure_reason": null },
-    { "id": "2", "status": "completed", "error_count": 0, "failure_reason": null }
+    { "id": "1", "status": "completed", "failure_reason": null },
+    { "id": "2", "status": "completed", "failure_reason": null }
   ]
 }
 ```
 
 **Checks:**
 - `stop_reason == "success"`.
-- `reason_detail` is `null`.
 - Both tasks completed; `git_manager.commit` called twice.
-- No `FatalTaskError` raised.
-- `error_count` and `failure_reason` both untouched (0 / null) — new fields must not
-  interfere with the normal workflow.
+- `failure_reason` untouched (null) — new fields must not interfere with normal workflow.
 
 ---
 
-### B.7 — Cross-Run Context Injection (Previous Error Surfaced in Prompt)
+### B.5 — Recovery After Failed Task (User Fixes Issue, Re-runs)
 
-**Fixture**: Task with `error_count=1` and a recorded `last_error`:
+User fixes the underlying issue and deletes or changes the failed task's status back to
+`"pending"` before re-running. The run should proceed normally.
+
+**Fixture**: Manually reset task 1 to `"pending"` (simulating user intervention):
 ```json
 {
-  "requirement": "context injection test",
-  "stop_reason": null, "reason_detail": null,
-  "tasks": [{
-    "id": "1", "title": "Retry task", "description": "needs context from last run",
-    "test_command": "echo ok", "status": "pending",
-    "error_count": 1, "last_error": "TypeError: cannot unpack non-sequence int",
-    "failure_reason": null, "updated_time": "2026-03-15T00:00:00"
-  }]
+  "requirement": "recovery test",
+  "stop_reason": "repeated_failure",
+  "reason_detail": "Task [1] failed in a previous run...",
+  "tasks": [
+    { "id": "1", "title": "Fixed task", "description": "now works",
+      "test_command": "echo ok", "status": "pending",
+      "failure_reason": null, "updated_time": null }
+  ]
 }
 ```
 
-**Executor mock**: returns `(0, "Tests passed")` (task succeeds this time).
+**Executor mock**: `[(0, "Tests passed")]`.
+
+**Expected `tasks.json` after run:**
+```json
+{
+  "stop_reason": "success",
+  "reason_detail": null,
+  "tasks": [{ "id": "1", "status": "completed" }]
+}
+```
 
 **Checks:**
-- The prompt passed to `coding_tool.query` contains `"PREVIOUS RUN ERROR"` and
-  `"TypeError: cannot unpack non-sequence int"` — the cross-run context was injected.
-- After successful completion: `error_count` stays `1` (not reset), `status == "completed"`,
-  `stop_reason == "success"`.
+- No `"failed"` tasks at startup → run proceeds normally.
+- `stop_reason` overwritten from `"repeated_failure"` → `"success"`.
 
 ---
 
 ## Part C: Edge Cases
 
-### C.1 — `last_error` Truncation at 1000 Characters
+### C.1 — `failure_reason` Truncation at 1000 Characters
 
-**Fixture**: Task with `error_count=0`. Executor returns `(1, "x" * 1001)`.
+**Fixture**: Task with `status="pending"`. Executor returns `(1, "x" * 1001)`.
 
 **Expected after run:**
-- `len(task["last_error"]) == 1000`
+- `len(task["failure_reason"]) == 1000`
 - `tasks.json` is valid JSON (parse with `json.loads`)
-- `reason_detail` (if fatal) embeds the truncated string without exceeding file sanity
 
-### C.2 — `record_task_error` for Non-Existent Task ID
+### C.2 — `record_task_failure` for Non-Existent Task ID
 
-Call `record_task_error("999", "err")` on a manager with only task `"1"`.
-- Returns `False`
-- No task's `error_count` changes
+Call `record_task_failure("999", "err")` on a manager with only task `"1"`.
 - No exception raised
-- `tasks.json` written successfully (save still called)
+- Task `"1"` unchanged (`failure_reason` still null)
+- `tasks.json` written successfully
 
-### C.3 — `[completed, fatal, pending]` — Correct Task Returned
+### C.3 — `[completed, failed, pending]` — Correct Task Returned
 
 **Fixture**:
 ```json
 "tasks": [
-  { "id": "1", "status": "completed", "error_count": 0 },
-  { "id": "2", "status": "fatal",     "error_count": 3 },
-  { "id": "3", "status": "pending",   "error_count": 0 }
+  { "id": "1", "status": "completed" },
+  { "id": "2", "status": "failed", "failure_reason": "old error" },
+  { "id": "3", "status": "pending" }
 ]
 ```
 
-`get_next_task()` must return task `"3"`. Tasks `"1"` and `"2"` must remain unchanged.
+BUT: since task 2 has `status="failed"`, `run()` detects it at startup and stops immediately.
+`get_next_task()` called in isolation must return task `"3"` (the pending one).
 
 ### C.4 — `stop_reason` Reflects the Actual Stop Cause
 
-This tests all three `stop_reason` values in one fixture sequence:
+Tests all three `stop_reason` values in a fixture sequence:
 
 | State | `stop_reason` | `reason_detail` |
 |---|---|---|
-| Mid-run (freshly created) | `null` | `null` |
-| After `FatalTaskError` on task 1 | `"repeated_failure"` | contains `"Task [1]"` + error text |
-| After `--recover` completes task 2 | `"success"` | `null` |
+| Freshly created / mid-run | `null` | `null` |
+| Run detects failed task at startup | `"repeated_failure"` | contains `"Task [1]"` + error text |
+| User resets task to pending, re-runs, all complete | `"success"` | `null` |
 
-Use the B.3 → B.5 fixture chain. Verify each stage by reading `tasks.json` between runs.
+Use the B.1 → B.2 → B.5 fixture chain. Verify each stage by reading `tasks.json` between runs.
 
-### C.5 — `error_count` Already at Threshold in Fixture (`error_count=3, status="pending"`)
+### C.5 — Failed Task Never Left in `"in_progress"` State
 
-If the user manually edits `tasks.json` to set `error_count=3` but `status="pending"`,
-the next `record_task_error` call sets `error_count=4` and still triggers fatal.
-
-**Expected `failure_reason`**: contains `"4 times"` (correct: it incremented to 4 before checking `>= 3`).
-**Expected `stop_reason`**: `"repeated_failure"`.
-
-### C.6 — Fatal Task Never Left in `"in_progress"` State
-
-After any fatal run, reload `TaskManager` from disk:
-- `status == "fatal"` (not `"in_progress"`)
-- `stop_reason == "repeated_failure"`
+After any run that marks a task `"failed"`, reload `TaskManager` from disk:
+- `status == "failed"` (not `"in_progress"`)
 - `updated_time` is a valid ISO timestamp
 
-### C.7 — `stop_reason` Not Overwritten When Run Is Interrupted Mid-Task
+### C.6 — `stop_reason` Not Overwritten When Run Is Interrupted Mid-Task
 
-If the process is killed while a task is `"in_progress"`, `tasks.json` has no `stop_reason`
-written yet (it's only written at clean stop points). On reload: `stop_reason == null`.
-Simulate by calling `update_task_status("1", "in_progress")` then reading the file —
-`stop_reason` must still be `null`.
+If the process is killed while a task is `"in_progress"`, `stop_reason` has not yet been
+written. On reload: `stop_reason == null`. Simulate by calling
+`update_task_status("1", "in_progress")` then reading the file — `stop_reason` must still
+be `null`.
 
 ---
 
@@ -528,32 +383,29 @@ Simulate by calling `update_task_status("1", "in_progress")` then reading the fi
 | Event | `stop_reason` | `reason_detail` |
 |---|---|---|
 | Freshly created / mid-run | `null` | `null` |
-| Task fails (below threshold) | `null` | `null` |
-| `FatalTaskError` raised | `"repeated_failure"` | `"Task [id] failed N times. <error>"` |
+| Task fails within a run (others may continue) | `null` | `null` |
+| Run detects a previously-failed task | `"repeated_failure"` | `"Task [id] '<title>' failed in a previous run. <failure_reason>"` |
 | All tasks complete | `"success"` | `null` |
-| Recovery completes remaining tasks | `"success"` | `null` |
+| User resets failed task, re-run completes | `"success"` | `null` |
 
 **Per-task fields at each state:**
 
-| `status` | `error_count` | `last_error` | `failure_reason` |
-|---|---|---|---|
-| `"pending"` (no failures) | `0` | `null` | `null` |
-| `"pending"` (failed once) | `1` | `"<msg>"` ≤1000 chars | `null` |
-| `"pending"` (failed twice) | `2` | `"<msg>"` | `null` |
-| `"fatal"` | `3` | `"<msg>"` | non-null, contains count + error |
-| `"completed"` | `0` | `null` | `null` |
+| `status` | `failure_reason` |
+|---|---|
+| `"pending"` (no failures) | `null` |
+| `"failed"` (failed in this run) | non-null, ≤1000 chars |
+| `"completed"` | `null` |
 
 ---
 
 ## Part E: Execution Order
 
-1. **A.1** — Run all 80 existing tests. Must pass before continuing.
-2. **A.2** — Add and run 6 gap unit tests (A2-1 through A2-6).
-3. **B.6** — Happy path (baseline check — no failures, `stop_reason="success"`).
-4. **B.1 → B.2 → B.3** — Run in sequence as a three-step fixture chain to verify cross-run accumulation.
-5. **B.4** — Multi-task fatal stops at task 1, task 2 untouched.
-6. **B.5** — Recovery overwrites `stop_reason` to `"success"`.
-7. **B.7** — Cross-run context injection into the AI prompt.
-8. **C.1–C.7** — Edge cases.
+1. **A.1** — Run all 82 existing tests. Must pass before continuing.
+2. **B.4** — Happy path (baseline check — no failures, `stop_reason="success"`).
+3. **B.1** — First-run failure: task 1 fails, task 2 completes, `stop_reason="success"`.
+4. **B.2** — Second run with B.1 output: detected immediately, `stop_reason="repeated_failure"`.
+5. **B.3** — Multi-task variant of the same detection.
+6. **B.5** — User resets failed task, re-run succeeds, `stop_reason` flips to `"success"`.
+7. **C.1–C.6** — Edge cases.
 
 All scenarios in B and C verify state purely by reading `tasks.json`. No AI tool needs to run.
