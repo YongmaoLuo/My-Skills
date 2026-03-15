@@ -22,6 +22,8 @@ class TaskManager:
         self.tasks_file = project_dir / "tasks.json"
         self.tasks: List[SubTask] = []
         self.requirement: str = ""
+        self.stop_reason: Optional[str] = None
+        self.reason_detail: Optional[str] = None
         self.load_tasks()
     
     def load_tasks(self):
@@ -46,6 +48,8 @@ class TaskManager:
         if isinstance(data, dict):
             self.tasks = [_make_task(t) for t in data.get("tasks", [])]
             self.requirement = data.get("requirement", "")
+            self.stop_reason = data.get("stop_reason", None)
+            self.reason_detail = data.get("reason_detail", None)
         else:
             self.tasks = [_make_task(t) for t in data]
     
@@ -60,6 +64,8 @@ class TaskManager:
                 tasks_data.append(task_dict)
             json.dump({
                 "requirement": self.requirement,
+                "stop_reason": self.stop_reason,
+                "reason_detail": self.reason_detail,
                 "tasks": tasks_data
             }, f, indent=2)
     
@@ -145,6 +151,18 @@ class TaskManager:
         self.save_tasks()
         return False
     
+    def set_stop_reason(self, reason: str, detail: Optional[str] = None):
+        """
+        Record why the run stopped, persisted as top-level fields in tasks.json.
+
+        Args:
+            reason: One of 'success' or 'repeated_failure'
+            detail: Human-readable description of the specific stopping cause
+        """
+        self.stop_reason = reason
+        self.reason_detail = detail
+        self.save_tasks()
+
     def add_task(self, task: SubTask):
         """
         Add a new task.

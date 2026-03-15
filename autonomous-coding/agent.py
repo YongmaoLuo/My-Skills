@@ -185,6 +185,7 @@ class AutonomousAgent:
             task = self.task_manager.get_next_task()
             if not task:
                 if total_tasks > 0:
+                    self.task_manager.set_stop_reason("success")
                     print("\nAll tasks completed!")
                 break
 
@@ -192,6 +193,11 @@ class AutonomousAgent:
             try:
                 success = self._execute_task_with_retry(task, max_retries=self.config.max_retries, timeout=timeout)
             except FatalTaskError as e:
+                detail = (
+                    f"Task [{e.task_id}] failed {self.task_manager.MAX_TASK_ERRORS} times. "
+                    f"{e.reason}"
+                )
+                self.task_manager.set_stop_reason("repeated_failure", detail)
                 print(f"\n{'=' * 60}")
                 print(f"AUTONOMOUS CODING STOPPED — HUMAN INTERVENTION REQUIRED")
                 print(f"{'=' * 60}")
