@@ -10,7 +10,7 @@ from typing import Optional
 
 class SubTask:
     """Represents a single subtask in the autonomous coding workflow."""
-    
+
     def __init__(
         self,
         id: str,
@@ -18,7 +18,8 @@ class SubTask:
         description: str,
         test_command: str,
         status: str = "pending",
-        updated_time: Optional[str] = None
+        updated_time: Optional[str] = None,
+        **kwargs  # Accept and ignore extra fields for forward-compatibility
     ):
         self.id = id
         self.title = title
@@ -26,15 +27,15 @@ class SubTask:
         self.test_command = test_command
         self.status = status
         self.updated_time = updated_time
-    
+
     def model_dump(self, mode: str = 'python', exclude_none: bool = False) -> dict:
         """
         Convert task to dictionary.
-        
+
         Args:
             mode: Serialization mode (unused, kept for compatibility)
             exclude_none: Whether to exclude None values
-            
+
         Returns:
             Dictionary representation of the task
         """

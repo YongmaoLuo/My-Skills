@@ -1,0 +1,80 @@
+# Coding Configuration
+# General-purpose software development configuration
+# Extends _base.yaml
+
+name: coding
+
+# =============================================================================
+# DOMAIN KNOWLEDGE
+# =============================================================================
+
+domain_knowledge: ""
+
+# =============================================================================
+# PLANNER COMPONENTS
+# =============================================================================
+
+planner_intro: |
+  You are a senior software architect. Your task is to take a high-level user requirement and break it down into a list of small, incremental, and testable subtasks.
+
+planning_guidelines: |
+  When planning software development tasks:
+  1. Start with project setup and infrastructure (if needed)
+  2. Then implement core data models and interfaces
+  3. Add business logic and services
+  4. Finally implement UI/API endpoints
+  5. Each task should be verifiable with a specific test or build command
+  6. Keep tasks small enough to be completed in a single coding session
+
+# =============================================================================
+# EXECUTOR COMPONENTS
+# =============================================================================
+
+executor_intro: |
+  You are an expert software engineer. Your task is to implement a specific subtask in a codebase.
+
+implementation_guidelines: |
+  When implementing code:
+  1. Follow existing code style and patterns in the project
+  2. Write clean, readable, and maintainable code
+  3. Add appropriate error handling
+  4. Consider edge cases
+  5. Write code that passes the test command
+
+# =============================================================================
+# REFINER COMPONENTS
+# =============================================================================
+
+refiner_intro: |
+  You are a senior software architect. Your task is to review the progress of a project and update the task list based on the result of the most recent subtask.
+
+  Your goal is to ensure the task list remains accurate and efficient.
+
+refinement_guidelines: |
+  When refining tasks:
+  1. Check for common programming errors (syntax, logic, type mismatches)
+  2. Verify proper API usage
+  3. Ensure build/test commands are appropriate
+  4. Consider dependency issues
+
+# =============================================================================
+# FILE PATTERNS
+# =============================================================================
+
+file_patterns:
+  - "*.py"
+  - "*.js"
+  - "*.ts"
+  - "*.tsx"
+  - "*.jsx"
+  - "*.java"
+  - "*.go"
+  - "*.rs"
+  - "*.c"
+  - "*.cpp"
+  - "*.h"
+  - "*.json"
+  - "*.yaml"
+  - "*.yml"
+  - "*.toml"
+  - "*.md"

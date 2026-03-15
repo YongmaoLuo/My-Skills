@@ -5,56 +5,79 @@ license: MIT
 compatibility: opencode
 metadata:
   author: "Autonomous Coding System"
-  version: "3.0.0"
+  version: "4.0.0"
   category: "development"
   workflow: "fully-automated"
   global: true
 ---
 
-# Autonomous Coding Skill - Fully Automated Mode
+# Autonomous Coding Skill v4.0
 
 ## Overview
 This skill provides end-to-end autonomous software development. Simply describe what you want to build, and the system will automatically plan, implement, test, and deliver the complete project with no manual intervention required.
 
-## How It Works
+## What's New in v4.0
 
-### 1. **Single Command Invocation**
-- User provides requirement
-- System handles everything automatically
-- No manual task management needed
+### Domain-Specific Configurations
+- Use `--config coding` for general software development (default)
+- Use `--config harmonyos` for HarmonyOS app development
+- Create custom configs in `configs/` directory as YAML files
 
-### 2. **Automatic Workflow**
-- **Planning**: Automatically breaks down requirement into subtasks
-- **Implementation**: Generates and implements code for each task
-- **Testing**: Runs tests after each implementation
-- **Refinement**: Adjusts task list based on results
-- **Completion**: Delivers finished project
+### Smart Retry Mechanism
+- Automatic retry with error context (up to 5 attempts)
+- Intelligent task breakdown on repeated failures
+- Progress tracking across retry attempts
 
-### 3. **Intelligent Automation**
-- Context-aware coding for each task
-- Automatic test execution and validation
-- Smart retry mechanisms for failures
-- Git integration for version control
-- Progress tracking and status updates
+### Background Process Management
+- Long-running commands run as background processes
+- Auto-detection of stuck processes (no output for 3 minutes)
+- Auto-detection of timeout (exceeds 30 minutes)
+
+### Rollback Mechanism
+- Each successful task creates a git commit checkpoint
+- Easy rollback to any previous task state
+- View rollback points: `autonomous-coding rollback list -w ./project`
+- Rollback to task: `autonomous-coding rollback to 1-2 -w ./project`
+- Rollback to previous: `autonomous-coding rollback prev -w ./project`
 
 ## Usage
 
 ### Basic Invocation
 ```bash
-# Simply describe what you want
-Create a web application with React and Node.js
+# General software development
+autonomous-coding "Create a REST API with FastAPI" -w ./myproject
+
+# HarmonyOS development
+autonomous-coding --config harmonyos "Create a login page" -w ./harmonyos-app
 ```
 
 ### With Options
 ```bash
 # With custom project directory
-Create a todo application --project-dir "/path/to/project"
+autonomous-coding "Create a todo app" -w ./todo-app
 
-# With specific AI model
-Create a REST API --model "gemini-2.0-flash-exp"
+# With max tasks limit
+autonomous-coding "Build a web scraper" -w ./scraper --max-tasks 10
 
-# With recovery mode (after crash)
-Create a data processing pipeline --recover
+# Recovery mode (after crash)
+autonomous-coding --recover -w ./myproject
+```
+
+### Rollback Commands
+```bash
+# List available rollback points
+autonomous-coding rollback list -w ./myproject
+
+# Rollback to specific task
+autonomous-coding rollback to 1-2 -w ./myproject
+
+# Rollback to previous task (keeps changes stashed)
+autonomous-coding rollback prev --keep -w ./myproject
+```
+
+### List Configurations
+```bash
+autonomous-coding configs
 ```
 
 ## What Happens Automatically
@@ -68,111 +91,147 @@ Create a data processing pipeline --recover
    - Processes each task automatically
    - Generates code with full context
    - Runs tests after each implementation
-   - Commits successful changes
-   - Handles failures and retries
+   - Commits successful changes with task checkpoint format
+   - Handles failures with smart retry
 
 3. **Completion Phase**
    - Shows final results
    - Provides project summary
-   - Handles any final refinements
+   - All successful tasks have rollback points
 
 ## Features
 
-### 🚀 **Full Automation**
+### Full Automation
 - No manual task management
 - End-to-end workflow
 - Intelligent error handling
 - Automatic recovery
 
-### 🎯 **Smart Planning**
+### Smart Planning
 - Context-aware task breakdown
-- Hierarchical task organization
+- Hierarchical task organization (1, 1-1, 1-1-1)
 - Test-driven approach
 
-### 💻 **Intelligent Implementation**
+### Intelligent Implementation
 - Full file context awareness
 - Smart code generation
-- Error handling and retry
+- Error handling with retry (up to 5 times)
+- Task breakdown on repeated failures
 
-### 🧪 **Automated Testing**
+### Automated Testing
 - Test execution after each task
 - Validation and verification
 - Continuous integration
 
-### 📊 **Progress Tracking**
-- Real-time progress updates
-- Automatic status reporting
-- Completion tracking
+### Rollback Support
+- Git checkpoint for each successful task
+- Easy rollback via CLI
+- Stash or discard changes option
 
-## Global Installation
+### Background Execution
+- Long commands run as background processes
+- Auto-detection of stuck/timeout processes
+- Graceful process termination
 
-### One-Time Setup
+## Configuration
+
+### Built-in Configurations
+- `coding` - General software development (default)
+- `harmonyos` - HarmonyOS application development
+
+### Custom Configuration
+Create a YAML file in `configs/` directory:
+```yaml
+name: my-custom-config
+domain_knowledge: |
+  Your domain-specific knowledge here
+planner_system_prompt: |
+  Your planner prompt here
+executor_system_prompt: |
+  Your executor prompt here
+file_patterns:
+  - "*.py"
+  - "*.js"
+max_retries: 5
+background_task_timeout: 180
+```
+
+## Installation
+
 ```bash
-# Install skill globally
-mkdir -p ~/.config/opencode/skills/autonomous-coding
-cp SKILL.md *.py requirements.txt ~/.config/opencode/skills/autonomous-coding/
-
 # Install dependencies
-pip install -r requirements.txt
+pip install GitPython PyYAML
 ```
 
 ## Examples
 
 ### Simple Web App
 ```bash
-Create a React application with TypeScript and Tailwind CSS
+autonomous-coding "Create a React application with TypeScript and Tailwind CSS" -w ./react-app
 ```
 
 ### API Development
 ```bash
-Build a REST API with Node.js, Express, and PostgreSQL
+autonomous-coding "Build a REST API with Node.js, Express, and PostgreSQL" -w ./api
 ```
 
-### Full Stack Application
+### HarmonyOS Development
 ```bash
-Create a full-stack web application with React frontend and Node.js backend
+autonomous-coding --config harmonyos "Create a login page with form validation" -w ./harmonyos-app
 ```
 
 ## Benefits
 
-### ✅ **Simplicity**
+### Simplicity
 - Single command to start
 - No manual intervention needed
 - Clear and intuitive interface
 
-### ✅ **Efficiency**
+### Efficiency
 - End-to-end automation
 - Intelligent task management
-- Smart error handling
+- Smart error handling with retry
 
-### ✅ **Reliability**
+### Reliability
 - Automatic recovery from failures
 - Test-driven development
-- Version control integration
+- Version control integration with checkpoints
 
-### ✅ **Flexibility**
+### Flexibility
 - Works with any project type
-- Configurable options
+- Configurable options for different domains
 - Context-aware implementation
 
 ## Troubleshooting
 
-### Common Issues
 - **Requirement unclear**: Provide more specific details
-- **Tests failing**: System will automatically retry with different approaches
+- **Tests failing**: System will automatically retry with different approaches (up to 5 times)
 - **Git issues**: System will handle version control automatically
+- **Want to undo changes**: Use `autonomous-coding rollback` commands
+- **Long-running commands**: System automatically handles background processes
 
-### Getting Help
-- Use natural language to ask for clarification
-- System will provide guidance automatically
-- No manual status management needed
+## File Structure
 
-## Integration Notes
-
-This skill provides a completely hands-off approach to software development:
-- Describe what you want
-- System handles everything else
-- Get the finished result
-- No manual task management required
-
-The perfect balance between AI capability and user simplicity.
+```
+autonomous-coding/
+├── SKILL.md                    # This file
+├── __init__.py                 # Package init
+├── agent.py                    # Main orchestrator
+├── background_manager.py       # Background process management
+├── cli.py                      # Command line interface
+├── coding_tool.py              # AI coding tool interface
+├── config.py                   # AgentConfig dataclass
+├── config_loader.py            # YAML config loader
+├── config_registry.py          # Config registry with defaults
+├── executor.py                 # Command executor
+├── git_manager.py              # Git operations
+├── refiner.py                  # Task list refinement
+├── retry_manager.py            # Retry logic
+├── rollback_manager.py         # Rollback operations
+├── task.py                     # SubTask model
+├── task_manager.py             # Task persistence
+├── requirements.txt            # Dependencies
+└── configs/
+    ├── coding.yaml             # Default coding config
+    └── harmonyos.yaml          # HarmonyOS-specific config
+```
